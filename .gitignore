@@ -3,3 +3,4 @@ dist/
 .env
 .enhance-cache.json
 .claude/
+graphify-out/
