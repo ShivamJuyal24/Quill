@@ -478,6 +478,33 @@ node --check src/workers/documentWorker.js
 
 Automated tests for authentication, ownership isolation, upload validation, worker retries, and the complete upload-to-chat flow are still recommended before production launch.
 
+## 📊 Evaluation
+
+Retrieval quality was measured offline on a gold dataset of **50 questions** with known relevant chunks (`evals/rag_eval.json`), using Gemini `gemini-embedding-2` (3072-dim) + exact cosine similarity over pgvector.
+
+| Metric | Score |
+|---|---|
+| **hit@8** (gold chunk in top 8) | **0.920** |
+| **MRR** (mean reciprocal rank) | **0.687** |
+| **hit@1** | 0.540 |
+| **hit@3** | 0.800 |
+| **hit@5** | 0.900 |
+| **recall@8** | 0.862 |
+| **precision@8** | 0.172 |
+
+> Answer quality metrics (correctness, faithfulness, relevancy via LLM-as-judge) are pending — both Groq and Gemini free-tier quotas were exhausted during evaluation. Re-run `python evals/llm_judge_eval.py` once quotas reset to add answer-quality scores.
+
+### How to run
+
+```bash
+cd evals
+pip install -r requirements.txt
+python ragas_eval.py --skip-ragas   # retrieval metrics only
+python llm_judge_eval.py            # answer quality (needs API quota)
+```
+
+Results are written to `evals/ragas_results.json`.
+
 ## 🛑 Important Notes
 
 - `.env` files are ignored by Git and must never be committed.

@@ -4,3 +4,5 @@ dist/
 .enhance-cache.json
 .claude/
 graphify-out/
+evals/.embeddings_cache.json
+evals/ragas_results.json
