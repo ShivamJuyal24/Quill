@@ -1,0 +1,14 @@
+# Ragas eval environment (isolated from server/client app deps)
+# These versions are pinned because they work together with Ragas 0.4.3
+# and the langchain Groq / Gemini wrappers used below.
+ragas==0.4.3
+langchain==0.3.25
+langchain-core==0.3.86
+langchain-community==0.3.0
+langchain-text-splitters==0.3.8
+langchain-groq==0.2.3
+langchain-openai==0.2.14
+langchain-google-genai==2.1.12
+datasets==5.1.0
+python-dotenv==1.0.0
+numpy<3.0.0,>=1.21.0
