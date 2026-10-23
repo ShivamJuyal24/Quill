@@ -206,9 +206,10 @@ Index: `(user_id, created_at)`.
 | `chunk_index` | int | ordinal within document |
 | `content` | text | chunk text |
 | `embedding` | `vector(3072)` (nullable, `Unsupported`) | written via raw SQL; HNSW not used (pgvector HNSW cap = 2000 dims) |
+| `content_tsv` | `tsvector` (nullable, `Unsupported`) | generated column: `to_tsvector('english', content)`; used for full-text keyword search |
 | `created_at` | timestamptz | |
 
-Index: `(document_id)`.
+Index: `(document_id)`, GIN index on `(content_tsv)`.
 
 #### `chat_messages`
 
@@ -330,15 +331,24 @@ Progress reported via `job.updateProgress` (30/55/80/100).
 3. In parallel:
    - `embedTexts([message])` → question vector (pgvector literal).
    - fetch last 10 chat messages (desc) for history.
-4. Vector search: raw SQL
-   ```sql
-   SELECT id, content, 1 - (embedding <=> $q::vector) AS similarity
-   FROM document_chunks
-   WHERE document_id = $id AND embedding IS NOT NULL
-   ORDER BY embedding <=> $q::vector
-   LIMIT $topK   -- default 8
-   ```
-   (exact search; no ANN index).
+4. Hybrid search (vector + full-text, fused with RRF):
+   - **Vector search** — cosine distance over `embedding` (3072-dim Gemini vectors):
+     ```sql
+     SELECT id, content, 1 - (embedding <=> $q::vector) AS similarity
+     FROM document_chunks
+     WHERE document_id = $id AND embedding IS NOT NULL
+     ORDER BY embedding <=> $q::vector
+     LIMIT $topK * 2
+     ```
+   - **Keyword search** — PostgreSQL full-text search on `content_tsv` (GIN index):
+     ```sql
+     SELECT id, content, ts_rank(content_tsv, plainto_tsquery('english', $q)) AS rank
+     FROM document_chunks
+     WHERE document_id = $id AND content_tsv @@ plainto_tsquery('english', $q)
+     ORDER BY rank DESC
+     LIMIT $topK * 2
+     ```
+   - **RRF fusion** — `score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)` (default `k=60`, `TOP_K_CHUNKS=8`). Items appearing in both lists are boosted. Falls back to vector-only when `HYBRID_SEARCH_ENABLED=false`.
 5. If no chunks → 503.
 6. `generateAnswer({documentTitle, question, contextChunks, history})`:
    - Build numbered context `[1]..[n]`.
@@ -365,7 +375,11 @@ Progress reported via `job.updateProgress` (30/55/80/100).
 - **Model:** Gemini Embedding 2 (`gemini-embedding-2`), producing **3072-dimensional** vectors.
 - **Storage format:** pgvector literal string `"[v1,v2,...]"` written via raw SQL (Prisma `Unsupported("vector(3072)")`).
 - **Batching:** embedding API calls batched at 100 texts; worker inserts chunks in batches of 200.
-- **Retrieval:** cosine distance (`<=>`), exact scan, `TOP_K_CHUNKS` (default 8). HNSW not used because pgvector HNSW max is 2000 dims; revisit with IVFFlat or model change at scale.
+- **Retrieval — hybrid:** vector search (cosine distance `<=>`) **+** full-text search (PostgreSQL `tsvector` + GIN index) fused with **Reciprocal Rank Fusion (RRF)**.
+  - `score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)`, default `k=60` (`RRF_K`).
+  - Fetches `TOP_K_CHUNKS * 2` from each list, fuses, returns top `TOP_K_CHUNKS` (default 8).
+  - Controlled by `HYBRID_SEARCH_ENABLED` (default `true`); set to `false` for vector-only.
+- **Exact vector search:** HNSW not used because pgvector HNSW max is 2000 dims; revisit with IVFFlat or model change at scale.
 - **Compatibility constraint:** embedding model and `vector(3072)` column must stay in sync; changing models requires regenerating all embeddings and altering the column.
 - **Question embedding** uses the same model to keep vector spaces aligned.
 
@@ -399,7 +413,7 @@ Server required env (validated at boot in `src/config/env.js`, missing → exit 
 
 `DATABASE_URL`, `DIRECT_URL`, `UPSTASH_REDIS_URL`, `GEMINI_API_KEY`, `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
 
-Optional with defaults: `PORT` (5000), `CLIENT_URL` (http://localhost:3000), `SUPABASE_STORAGE_BUCKET` (documents), `GEMINI_EMBEDDING_MODEL` (gemini-embedding-2), `GEMINI_CHAT_MODEL` (gemini-2.0-flash), `GROQ_API_KEY`, `GROQ_CHAT_MODEL` (llama-3.3-70b-versatile), plus tunables (`MAX_FILE_SIZE_MB=20`, `MAX_CHUNKS_PER_DOCUMENT=4000`, `WORKER_CONCURRENCY=2`, `TOP_K_CHUNKS=8`, `RATE_LIMIT_UPLOAD_PER_HOUR=10`, `RATE_LIMIT_CHAT_PER_MIN=20`).
+Optional with defaults: `PORT` (5000), `CLIENT_URL` (http://localhost:3000), `SUPABASE_STORAGE_BUCKET` (documents), `GEMINI_EMBEDDING_MODEL` (gemini-embedding-2), `GEMINI_CHAT_MODEL` (gemini-2.0-flash), `GROQ_API_KEY`, `GROQ_CHAT_MODEL` (llama-3.3-70b-versatile), plus tunables (`MAX_FILE_SIZE_MB=20`, `MAX_CHUNKS_PER_DOCUMENT=4000`, `WORKER_CONCURRENCY=2`, `TOP_K_CHUNKS=8`, `HYBRID_SEARCH_ENABLED=true`, `RRF_K=60`, `RATE_LIMIT_UPLOAD_PER_HOUR=10`, `RATE_LIMIT_CHAT_PER_MIN=20`).
 
 Client env: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`. Client appends `/api/v1` to base URL in workspace calls.
 
@@ -419,6 +433,7 @@ Client env: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_S
 ## 14. Key design decisions
 
 - **Async ingestion:** uploads return immediately (201) and heavy PDF processing runs in BullMQ; UI polls status. Keeps API responsive.
+- **Hybrid retrieval:** vector search (semantic) + full-text search (lexical) fused with RRF. Keyword search catches exact terms/acronyms that embeddings miss; RRF boosts chunks ranked highly by both.
 - **Exact vector search:** 3072-dim embeddings exceed pgvector HNSW's 2000-dim limit, so exact scan is used (suitable for MVP scale).
 - **Groq-first with Gemini fallback:** optimizes cost/latency while retaining availability.
 - **Per-user isolation:** all queries and storage paths scoped by Clerk `userId`.
@@ -429,10 +444,22 @@ Client env: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_S
 
 ---
 
-## 15. Known gaps / notes
+## 15. Evaluation results (offline, 50-question gold set)
+
+| Metric | Vector-only | Hybrid | Change |
+|---|---|---|---|
+| hit@1 | 0.540 | 0.640 | +18.5% |
+| hit@3 | 0.800 | 0.860 | +7.5% |
+| hit@8 | 0.920 | 0.920 | 0.0% |
+| MRR@8 | 0.687 | 0.753 | +9.6% |
+
+Hybrid search = vector search + PostgreSQL full-text search (tsvector + GIN) fused with Reciprocal Rank Fusion (RRF, k=60). Full results in `evals/retrieval_compare_results.json`.
+
+## 16. Known gaps / notes
 
 - `client/lib/api.ts` helpers call `/upload` and `/chat` without `/api/v1` in some paths; the active workspace (`SplitPage`) uses `/api/v1/...`. Align if using helpers.
 - Embedding column is `Unsupported` in Prisma; all vector access is raw SQL.
 - Automated tests are not yet implemented (recommended before production).
 - Changing embedding model requires regenerating all embeddings and altering `vector(3072)`.
 - Worker runs inside the API process by default; for production, run `start:worker` separately and consider disabling in-process worker.
+- A neural cross-encoder re-ranker (after RRF) was considered but not implemented — could further improve top-of-list precision at the cost of latency.

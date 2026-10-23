@@ -7,6 +7,50 @@ import { logger } from '../utils/logger.js';
 
 const MAX_QUESTION_LENGTH = 4000;
 
+/**
+ * Reciprocal Rank Fusion (RRF) for hybrid search.
+ *
+ * Combines two ranked result lists (vector + keyword) into a single ranked list.
+ * Score for each item = sum(1 / (k + rank)) across all lists it appears in.
+ * Items appearing in both lists get boosted; k controls how much weight is given
+ * to top-ranked items vs. lower-ranked ones.
+ *
+ * @param {Array} vectorList - vector search results (already ranked)
+ * @param {Array} keywordList - keyword search results (already ranked)
+ * @param {number} limit - max number of fused results to return
+ * @param {number} k - RRF constant (default 60)
+ * @returns {Array} fused and re-ranked results, truncated to `limit`
+ */
+function fuseRRF(vectorList, keywordList, limit, k = 60) {
+  const scores = new Map();
+
+  const add = (list, sourceLabel) => {
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i];
+      const id = item.id;
+      if (!scores.has(id)) {
+        scores.set(id, { ...item, _rrfScore: 0, _source: [] });
+      }
+      const entry = scores.get(id);
+      entry._rrfScore += 1 / (k + i + 1);
+      if (!entry._source.includes(sourceLabel)) {
+        entry._source.push(sourceLabel);
+      }
+    }
+  };
+
+  add(vectorList, 'vector');
+  add(keywordList, 'keyword');
+
+  return Array.from(scores.values())
+    .sort((a, b) => b._rrfScore - a._rrfScore)
+    .slice(0, limit)
+    .map((entry) => {
+      const { _rrfScore, _source, ...rest } = entry;
+      return { ...rest, _rrfScore: Number(_rrfScore.toFixed(4)), _source };
+    });
+}
+
 export const chat = async (req, res) => {
   const requestId = req.headers['x-request-id'];
   const startedAt = process.hrtime.bigint();
@@ -60,14 +104,29 @@ export const chat = async (req, res) => {
   ]);
   const [questionVector] = questionVectors;
 
-  // 2. Retrieve the most similar chunks owned by this document (cosine distance).
-  const chunks = await timed('chat.vector-search', () => prisma.$queryRaw`
+  // 2. Retrieve chunks via hybrid search: vector (semantic) + full-text (lexical),
+  //    fused with Reciprocal Rank Fusion (RRF). Falls back to vector-only when
+  //    hybrid search is disabled or full-text search returns nothing.
+  const vectorChunks = await timed('chat.vector-search', () => prisma.$queryRaw`
     SELECT id, content, 1 - (embedding <=> ${questionVector}::vector) AS similarity
     FROM document_chunks
     WHERE document_id = ${documentId} AND embedding IS NOT NULL
     ORDER BY embedding <=> ${questionVector}::vector
-    LIMIT ${env.topKChunks}
-  `, { requestId, documentId, topK: env.topKChunks });
+    LIMIT ${env.topKChunks * 2}
+  `, { requestId, documentId, topK: env.topKChunks * 2 });
+
+  let keywordChunks = [];
+  if (env.hybridSearchEnabled === 'true') {
+    keywordChunks = await timed('chat.keyword-search', () => prisma.$queryRaw`
+      SELECT id, content, ts_rank(content_tsv, plainto_tsquery('english', ${message.trim()})) AS rank
+      FROM document_chunks
+      WHERE document_id = ${documentId} AND content_tsv @@ plainto_tsquery('english', ${message.trim()})
+      ORDER BY rank DESC
+      LIMIT ${env.topKChunks * 2}
+    `, { requestId, documentId, topK: env.topKChunks * 2 });
+  }
+
+  const chunks = fuseRRF(vectorChunks, keywordChunks, env.topKChunks, env.rrfK);
 
   if (chunks.length === 0) {
     throw new ApiError(503, 'No searchable content is available for this document yet. Please try again shortly.');

@@ -66,6 +66,8 @@ export const env = {
   maxChunksPerDocument: toInt(process.env.MAX_CHUNKS_PER_DOCUMENT, 4000),
   workerConcurrency: toInt(process.env.WORKER_CONCURRENCY, 2),
   topKChunks: toInt(process.env.TOP_K_CHUNKS, 8),
+  hybridSearchEnabled: process.env.HYBRID_SEARCH_ENABLED ?? 'true',
+  rrfK: toInt(process.env.RRF_K, 60),
   rateLimitUploadPerHour: toInt(process.env.RATE_LIMIT_UPLOAD_PER_HOUR, 10),
   rateLimitChatPerMin: toInt(process.env.RATE_LIMIT_CHAT_PER_MIN, 20),
 };

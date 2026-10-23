@@ -25,7 +25,7 @@ The application has a public landing page, authenticated document-chat workspace
 - Asynchronous document processing using BullMQ and Redis
 - PDF text extraction and sentence-aware chunking
 - 3072-dimensional Gemini embeddings stored with pgvector
-- Exact vector similarity search for high-dimensional embeddings
+- Hybrid retrieval: vector (semantic) + full-text (lexical) search fused with Reciprocal Rank Fusion (RRF)
 - Grounded RAG answers with numbered context citations
 - Groq-first chat generation with Gemini fallback
 - Per-user document and chat isolation
@@ -480,30 +480,37 @@ Automated tests for authentication, ownership isolation, upload validation, work
 
 ## 📊 Evaluation
 
-Retrieval quality was measured offline on a gold dataset of **50 questions** with known relevant chunks (`evals/rag_eval.json`), using Gemini `gemini-embedding-2` (3072-dim) + exact cosine similarity over pgvector.
+Retrieval quality was measured offline on a gold dataset of **50 questions** with known relevant chunks (`evals/rag_eval.json`), using Gemini `gemini-embedding-2` (3072-dim).
 
-| Metric | Score |
-|---|---|
-| **hit@8** (gold chunk in top 8) | **0.920** |
-| **MRR** (mean reciprocal rank) | **0.687** |
-| **hit@1** | 0.540 |
-| **hit@3** | 0.800 |
-| **hit@5** | 0.900 |
-| **recall@8** | 0.862 |
-| **precision@8** | 0.172 |
+### Retrieval: vector-only vs hybrid (vector + keyword + RRF)
+
+| Metric | Vector-only (before) | Hybrid (after) | Change |
+|---|---|---|---|
+| **hit@1** | 0.540 | **0.640** | **+18.5%** |
+| **hit@3** | 0.800 | **0.860** | +7.5% |
+| **hit@5** | 0.900 | **0.920** | +2.2% |
+| **hit@8** | 0.920 | **0.920** | 0.0% |
+| **MRR@8** | 0.687 | **0.753** | **+9.6%** |
+| **recall@8** | 0.862 | 0.853 | -1.0% |
+| **precision@8** | 0.172 | 0.170 | -1.4% |
+
+Hybrid search = vector search (cosine similarity over `embedding`) **+** full-text keyword search (PostgreSQL `tsvector` + GIN index) fused with **Reciprocal Rank Fusion (RRF)**. The most relevant chunk is far more likely to appear at rank 1 (hit@1 +18.5%), and overall ranking quality improves (MRR +9.6%), with no regression on hit@8.
+
+Hybrid search is enabled by default (`HYBRID_SEARCH_ENABLED=true`, `RRF_K=60`). Set `HYBRID_SEARCH_ENABLED=false` for vector-only.
 
 > Answer quality metrics (correctness, faithfulness, relevancy via LLM-as-judge) are pending — both Groq and Gemini free-tier quotas were exhausted during evaluation. Re-run `python evals/llm_judge_eval.py` once quotas reset to add answer-quality scores.
 
-### How to run
+### How to run retrieval comparison
 
 ```bash
 cd evals
 pip install -r requirements.txt
-python ragas_eval.py --skip-ragas   # retrieval metrics only
-python llm_judge_eval.py            # answer quality (needs API quota)
+python retrieval_compare.py        # vector-only vs hybrid comparison
+python ragas_eval.py --skip-ragas  # retrieval metrics only via API
+python llm_judge_eval.py           # answer quality (needs API quota)
 ```
 
-Results are written to `evals/ragas_results.json`.
+Results are written to `evals/retrieval_compare_results.json` and `evals/ragas_results.json`.
 
 ## 🛑 Important Notes
 
