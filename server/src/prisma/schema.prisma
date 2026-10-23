@@ -52,11 +52,15 @@ model DocumentChunk {
   // The 3072-dimensional Gemini Embedding 2 vectors use exact vector search;
   // pgvector HNSW indexes support at most 2000 dimensions.
   embedding  Unsupported("vector(3072)")?
+  // Full-text search column — populated by a generated column in the migration.
+  // Prisma can't manage tsvector directly, so it's read-only via $queryRaw.
+  contentTsv Unsupported("tsvector")?
   createdAt  DateTime                    @default(now()) @map("created_at")
 
   document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId])
+  @@index([contentTsv])
   @@map("document_chunks")
 }
 

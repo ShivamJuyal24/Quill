@@ -6,3 +6,4 @@ dist/
 graphify-out/
 evals/.embeddings_cache.json
 evals/ragas_results.json
+evals/.compare_cache.json
