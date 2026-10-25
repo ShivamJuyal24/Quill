@@ -1,20 +1,27 @@
-"""LLM-as-judge evaluation for Quill RAG answers.
+"""Resumable LLM-as-judge evaluation for Quill RAG answers (Groq key pool).
 
-Reads evals/ragas_results.json (50 questions with generated answers),
-scores each answer with Groq for:
-  - correctness: does the answer match the reference answer? (0-1)
-  - faithfulness: is the answer grounded in the retrieved context? (0-1)
-  - relevancy: does the answer actually address the question? (0-1)
+Reads evals/ragas_results.json (per_question rows with `response`,
+`retrieved_contexts`, `reference`; produced by ragas_eval.py) and scores each
+answer with Groq for correctness / faithfulness / relevancy (0-1).
 
-No Ragas dependency — uses Groq directly as the judge. Fast and reliable.
+  * Never overwrites the input file; writes evals/llm_judge_results.json
+  * Rotates through the keys in GROQ_API_KEYS (see key_pool.py)
+  * When every key is out of daily quota it saves and stops; run it again
+    later and already-scored questions/metrics are skipped
+  * Failed calls stay unscored (None) and are retried next run; n is reported
 
 Usage:
     python evals/llm_judge_eval.py
+    python evals/llm_judge_eval.py --limit 10
+    python evals/llm_judge_eval.py --model llama-3.1-8b-instant
 """
 
+import argparse
+import hashlib
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -23,11 +30,14 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 load_dotenv(ROOT / "server" / ".env")
 
-from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
+
+from eval_utils import atomic_json_write, load_json_strict, validate_answer_rows, validate_output_path
+from key_pool import GroqKeyPool, AllKeysExhausted
 
 
 def mean(xs):
@@ -83,146 +93,166 @@ If the candidate says "I don't know" or refuses to answer, score 0.0.
 Respond with ONLY a number between 0 and 1 (e.g., 0.85)."""
 
 
-def judge_score(llm, prompt_template, **kwargs):
-    """Ask Groq to produce a 0-1 score. Returns float or None."""
-    prompt = prompt_template.format(**kwargs)
+METRICS = [
+    ("judge_correctness", CORRECTNESS_PROMPT),
+    ("judge_faithfulness", FAITHFULNESS_PROMPT),
+    ("judge_relevancy", RELEVANCY_PROMPT),
+]
+
+
+def judge_score(pool, model, template, **kwargs):
+    """Ask the judge for a 0-1 score. Returns float, or None on a non-quota failure.
+    AllKeysExhausted propagates so the caller can save and stop."""
+    prompt = template.format(**kwargs)
+    messages = [
+        SystemMessage(content="You are a precise scoring evaluator. Respond with only a decimal number between 0 and 1."),
+        HumanMessage(content=prompt),
+    ]
     try:
-        messages = [
-            SystemMessage(content="You are a precise scoring evaluator. Respond with only a decimal number between 0 and 1."),
-            HumanMessage(content=prompt),
-        ]
-        resp = llm.invoke(messages)
+        resp = pool.invoke(messages, model=model, temperature=0.0)
         text = (resp.content or "").strip()
-        # Extract the first number found
-        import re
-        m = re.search(r"0?\.\d+|1\.0|1|0", text)
+        m = re.search(r"\d*\.?\d+", text)
         if m:
-            val = float(m.group())
-            return max(0.0, min(1.0, val))
+            return max(0.0, min(1.0, float(m.group())))
+    except AllKeysExhausted:
+        raise
     except Exception as e:
-        print(f"  [judge error: {e}]", flush=True)
+        print(f"  [judge error: {str(e)[:200]}]", flush=True)
     return None
 
 
 def main():
-    results_path = Path(__file__).parent / "ragas_results.json"
-    data = json.loads(results_path.read_text(encoding="utf-8"))
-    per_question = data["per_question"]
-    retrieval_rows = data.get("retrieval_rows", [])
+    ap = argparse.ArgumentParser(description="LLM-as-judge for Quill RAG answers")
+    ap.add_argument("--input", default=str(Path(__file__).parent / "ragas_results.json"))
+    ap.add_argument("--output", default=str(Path(__file__).parent / "llm_judge_results.json"))
+    ap.add_argument("--model", default=None, help="judge model (default: model recorded in the results file)")
+    ap.add_argument("--limit", type=int, default=None, help="judge only the first N questions")
+    ap.add_argument("--max-wait", type=float, default=90.0,
+                    help="retained for compatibility; temporary cooldowns never count as daily exhaustion")
+    args = ap.parse_args()
 
-    print(f"Loaded {len(per_question)} questions")
+    src_path = Path(args.input)
+    out_path = Path(args.output)
+    validate_output_path(out_path)
+    src = load_json_strict(src_path)
+    per_question = validate_answer_rows(src["per_question"], src_path.name)
+    retrieval_rows = src.get("retrieval_rows", [])
+    summary_in = src.get("summary", {})
 
-    llm = ChatGroq(
-        model=data["summary"]["groq_model"],
-        groq_api_key=os.getenv("GROQ_API_KEY"),
-        temperature=0.0,
-    )
+    if not per_question:
+        sys.exit(
+            f"{src_path.name} has no generated answers (per_question rows lack 'response').\n"
+            "Generate them first:  python evals/ragas_eval.py --skip-ragas"
+        )
+    if args.limit:
+        per_question = per_question[: args.limit]
 
-    correctness_scores = []
-    faithfulness_scores = []
-    relevancy_scores = []
-
-    for i, row in enumerate(per_question, 1):
-        qid = row["id"]
-        question = row["question"]
-        candidate = row["response"]
-        reference = row.get("reference", "")
-        context = "\n".join(row.get("retrieved_contexts", []))
-
-        print(f"[{i}/{len(per_question)}] {qid}", end=" ", flush=True)
-
-        c = judge_score(llm, CORRECTNESS_PROMPT,
-                        question=question, reference=reference, candidate=candidate)
-        f = judge_score(llm, FAITHFULNESS_PROMPT,
-                        question=question, context=context, candidate=candidate)
-        r = judge_score(llm, RELEVANCY_PROMPT,
-                        question=question, candidate=candidate)
-
-        if c is not None:
-            correctness_scores.append(c)
-            row["judge_correctness"] = c
-        if f is not None:
-            faithfulness_scores.append(f)
-            row["judge_faithfulness"] = f
-        if r is not None:
-            relevancy_scores.append(r)
-            row["judge_relevancy"] = r
-
-        print(f"correctness={c} faithfulness={f} relevancy={r}", flush=True)
-
-    # ---- aggregate retrieval ----
-    topks = [1, 3, 5, 8, 10]
-    agg = {}
-    for k in topks:
-        hit_key = f"hit@{k}"
-        rec_key = f"recall@{k}"
-        prec_key = f"precision@{k}"
-        if retrieval_rows and hit_key in retrieval_rows[0]:
-            agg[f"retrieval_hit@{k}"] = mean([r[hit_key] for r in retrieval_rows])
-            agg[f"retrieval_recall@{k}"] = mean([r[rec_key] for r in retrieval_rows])
-            agg[f"retrieval_precision@{k}"] = mean([r[prec_key] for r in retrieval_rows])
-    agg["retrieval_mrr"] = mean([r["mrr"] for r in retrieval_rows])
-
-    # ---- aggregate judge ----
-    agg["judge_correctness"] = mean(correctness_scores)
-    agg["judge_faithfulness"] = mean(faithfulness_scores)
-    agg["judge_relevancy"] = mean(relevancy_scores)
-    agg["judge_n"] = len(correctness_scores)
-
-    # per-question combined
-    combined = []
-    for r in retrieval_rows:
-        row = {
-            "id": r["id"],
-            "type": r["type"],
-            "difficulty": r["difficulty"],
-            "answerable": r["answerable"],
-            **{k: v for k, v in r.items() if k.startswith(("hit@", "recall@", "precision@", "mrr", "gold", "retrieved", "first_relevant_rank"))},
+    model = args.model or summary_in.get("groq_model") or os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+    signature_data = [
+        {
+            "id": str(row["id"]),
+            "question": row["question"],
+            "reference": row.get("reference", ""),
+            "response": row["response"],
+            "retrieved_contexts": row.get("retrieved_contexts", []),
         }
-        qrow = next((x for x in per_question if x["id"] == r["id"]), None)
-        if qrow:
-            for m in ["judge_correctness", "judge_faithfulness", "judge_relevancy"]:
-                row[m] = qrow.get(m)
-        combined.append(row)
+        for row in per_question
+    ]
+    input_fingerprint = hashlib.sha256(
+        json.dumps({"model": model, "rows": signature_data}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    pool = GroqKeyPool(max_wait=args.max_wait)
+    print(f"Judge model: {model}   Questions: {len(per_question)}")
 
-    summary = {
-        "embedding_model": data["summary"]["embedding_model"],
-        "groq_model": data["summary"]["groq_model"],
-        "top_k": data["summary"]["top_k"],
-        "num_questions": data["summary"]["num_questions"],
-        "num_chunks": data["summary"]["num_chunks"],
-        "judge_n": agg["judge_n"],
-        "aggregate": agg,
-    }
+    # ---- resume ----
+    scored = {}
+    if out_path.exists():
+        try:
+            prev = load_json_strict(out_path)
+            if prev.get("input_fingerprint") != input_fingerprint:
+                raise SystemExit(
+                    f"Existing judge output {out_path.name} belongs to different answers/model; "
+                    "choose a new --output path to avoid reusing stale scores."
+                )
+            scored = {r["id"]: r for r in prev.get("per_question", [])}
+        except SystemExit:
+            raise
+        except Exception:
+            raise SystemExit(f"Existing judge output {out_path.name} is invalid; choose a new --output path")
 
-    out = {
-        "summary": summary,
-        "per_question": combined,
-        "retrieval_rows": retrieval_rows,
-    }
-    results_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    def aggregate(rows):
+        agg = {}
+        for key, _ in METRICS:
+            vals = [r.get(key) for r in rows if r.get(key) is not None]
+            agg[key] = mean(vals)
+            agg[key + "_n"] = len(vals)
+        return agg
 
-    # ---- print summary ----
-    print("\n========== RETRIEVAL (all 50 questions) ==========")
-    print(f"N questions: {data['summary']['num_questions']}")
+    def save():
+        rows = [scored[q["id"]] for q in per_question if q["id"] in scored]
+        agg = aggregate(rows)
+        out = {
+            "summary": {
+                "judge_model": model,
+                "embedding_model": summary_in.get("embedding_model"),
+                "top_k": summary_in.get("top_k"),
+                "num_questions": len(per_question),
+                "judged_rows": len(rows),
+                "aggregate": agg,
+                "input_fingerprint": input_fingerprint,
+            },
+            "input_fingerprint": input_fingerprint,
+            "per_question": rows,
+        }
+        atomic_json_write(out_path, out)
+        return agg
+
+    # ---- judge ----
+    stopped = False
+    try:
+        for i, row in enumerate(per_question, 1):
+            qid = row["id"]
+            have = scored.get(qid, {"id": qid})
+            todo = [(k, t) for k, t in METRICS if have.get(k) is None]
+            if not todo:
+                continue
+
+            print(f"[{i}/{len(per_question)}] {qid}", end=" ", flush=True)
+            kwargs = dict(
+                question=row["question"],
+                reference=row.get("reference", ""),
+                candidate=row["response"],
+                context="\n".join(row.get("retrieved_contexts", [])),
+            )
+            try:
+                for key, template in todo:
+                    have[key] = judge_score(pool, model, template, **kwargs)
+            finally:
+                scored[qid] = have   # keep whatever was scored before a stop
+                save()
+            print(" ".join(f"{k.replace('judge_', '')}={have.get(k)}" for k, _ in METRICS), flush=True)
+    except AllKeysExhausted as e:
+        stopped = True
+        print(f"\nAll Groq keys are out of quota ({e}).")
+        print(f"Progress saved to {out_path.name}. Run again after the quotas reset, or add more keys.")
+
+    agg = save()
+
+    # ---- retrieval aggregate (computed directly, no LLM) ----
+    topks = sorted({int(k.split("@")[1]) for k in (retrieval_rows[0] if retrieval_rows else {}) if k.startswith("hit@")})
+    print("\n========== RETRIEVAL ==========")
     for k in topks:
-        print(f"  hit@{k:2d}:   {agg[f'retrieval_hit@{k}']:.3f}")
-        print(f"  recall@{k:2d}: {agg[f'retrieval_recall@{k}']:.3f}")
-        print(f"  precision@{k:2d}: {agg[f'retrieval_precision@{k}']:.3f}")
-    print(f"  MRR:            {agg['retrieval_mrr']:.3f}")
+        print(f"  hit@{k:<2d}: {mean([r[f'hit@{k}'] for r in retrieval_rows]):.3f}   "
+              f"recall@{k:<2d}: {mean([r[f'recall@{k}'] for r in retrieval_rows]):.3f}")
+    if retrieval_rows:
+        print(f"  MRR: {mean([r['mrr'] for r in retrieval_rows]):.3f}")
 
-    print("\n========== LLM-AS-JUDGE (answer quality) ==========")
-    print(f"  correctness:     {agg['judge_correctness']:.3f} (n={agg['judge_n']})")
-    print(f"  faithfulness:    {agg['judge_faithfulness']:.3f} (n={agg['judge_n']})")
-    print(f"  relevancy:       {agg['judge_relevancy']:.3f} (n={agg['judge_n']})")
-
-    print(f"\nWrote {results_path}")
-    print("\nResume-ready headline:")
-    top_k = data["summary"]["top_k"]
-    print(f"  Retrieval hit@{top_k}: {agg[f'retrieval_hit@{top_k}']:.3f} | "
-          f"MRR: {agg['retrieval_mrr']:.3f} | "
-          f"Judge correctness: {agg['judge_correctness']:.3f} | "
-          f"Judge faithfulness: {agg['judge_faithfulness']:.3f}")
+    print("\n========== LLM-AS-JUDGE ==========")
+    for key, _ in METRICS:
+        print(f"  {key.replace('judge_', ''):<13}: {agg[key]:.3f}  (n={agg[key + '_n']}/{len(per_question)})")
+    if stopped or any(agg[k + "_n"] < len(per_question) for k, _ in METRICS):
+        print("\n  INCOMPLETE: some questions are not scored yet. Re-run to finish before quoting these numbers.")
+    print(f"\nWrote {out_path}")
 
 
 if __name__ == "__main__":
