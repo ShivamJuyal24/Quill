@@ -7,3 +7,26 @@ graphify-out/
 evals/.embeddings_cache.json
 evals/ragas_results.json
 evals/.compare_cache.json
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Local tooling / scratch scripts
+.kilo/
+/audit*.py
+/calc.py
+/test_keypool*.py
+
+# Eval caches, runtime state, and one-off test state
+evals/.embed_cache_voyage.json
+evals/.groq_key_pool_state.json
+evals/.test_pool_state*.json
+
+# Stale eval backups and old artifacts
+evals/ragas_results.*.json
+evals/ragas_ragas_metrics.json
+
+# Optional/generated eval outputs
+evals/llm_judge_results.json
+evals/ragas_subset_metrics_results.json

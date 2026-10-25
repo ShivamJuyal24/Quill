@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / "server" / ".env")
 
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from eval_utils import atomic_json_write, content_hash, validate_output_path
 
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +196,7 @@ def main():
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--output", default=str(Path(__file__).parent / "retrieval_compare_results.json"))
     args = parser.parse_args()
+    validate_output_path(args.output)
 
     topks = sorted({int(x) for x in args.topks.split(",") if x.strip()})
     if args.k not in topks:
@@ -226,28 +228,40 @@ def main():
             cache = {}
     cache.setdefault("model", args.embedding_model)
     cache.setdefault("chunks", {})
+    cache.setdefault("questions", {})
 
     if cache.get("model") != args.embedding_model:
-        cache = {"model": args.embedding_model, "chunks": {}}
+        cache = {"model": args.embedding_model, "chunks": {}, "questions": {}}
 
-    missing = [cid for cid in chunk_ids if cid not in cache["chunks"]]
+    chunk_hashes = [content_hash(text) for text in chunk_texts]
+    text_by_hash = dict(zip(chunk_hashes, chunk_texts))
+    missing = list(dict.fromkeys(key for key in chunk_hashes if key not in cache["chunks"]))
     if missing:
-        missing_texts = [chunk_texts[chunk_ids.index(c)] for c in missing]
+        missing_texts = [text_by_hash[key] for key in missing]
         print(f"Embedding {len(missing_texts)} chunks (batched)...")
         vecs = embed_texts_with_retry(embedder, missing_texts)
-        for cid, v in zip(missing, vecs):
-            cache["chunks"][cid] = v.tolist()
+        for key, v in zip(missing, vecs):
+            cache["chunks"][key] = v.tolist()
         if not args.no_cache:
-            cache_path.write_text(json.dumps(cache), encoding="utf-8")
+            atomic_json_write(cache_path, cache)
     else:
         print("Chunk embeddings cached.")
 
-    chunk_matrix = np.asarray([cache["chunks"][cid] for cid in chunk_ids], dtype=np.float32)
+    chunk_matrix = np.asarray([cache["chunks"][key] for key in chunk_hashes], dtype=np.float32)
 
     # ---- embed questions ----
     q_texts = [q["question"] for q in questions]
-    print(f"Embedding {len(q_texts)} questions (batched)...")
-    q_vecs = embed_texts_with_retry(embedder, q_texts, task_type="retrieval_query")
+    q_hashes = [content_hash(text) for text in q_texts]
+    question_by_hash = dict(zip(q_hashes, q_texts))
+    missing_q = list(dict.fromkeys(key for key in q_hashes if key not in cache["questions"]))
+    print(f"Embedding {len(missing_q)} uncached questions (batched)...")
+    if missing_q:
+        q_vecs_missing = embed_texts_with_retry(embedder, [question_by_hash[key] for key in missing_q], task_type="retrieval_query")
+        for key, vector in zip(missing_q, q_vecs_missing):
+            cache["questions"][key] = vector.tolist()
+        if not args.no_cache:
+            atomic_json_write(cache_path, cache)
+    q_vecs = np.asarray([cache["questions"][key] for key in q_hashes], dtype=np.float32)
 
     # ---- run strategies ----
     results = {}
@@ -363,7 +377,7 @@ def main():
         "num_chunks": len(chunks),
         "results": results,
     }
-    Path(args.output).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_json_write(args.output, out)
     print(f"\nWrote {args.output}")
 
 

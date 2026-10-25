@@ -1,184 +1,164 @@
-"""Run Ragas scoring on already-generated eval results.
+"""Resumable Ragas scoring; reads answer results and writes a separate artifact."""
 
-Reads evals/ragas_results.json (which must have per_question rows with
-question, response, retrieved_contexts, reference, reference_contexts),
-runs Ragas metrics, and writes back the merged results.
-
-Usage:
-    python evals/ragas_score.py
-"""
-
-import json
-import math
+import argparse
 import os
 import sys
 from pathlib import Path
 
-import numpy as np
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
+EVALS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-
+sys.path.insert(0, str(EVALS))
 load_dotenv(ROOT / "server" / ".env")
 
-from langchain_groq import ChatGroq
 from datasets import Dataset
-from ragas import evaluate
-from ragas.metrics import (
-    context_precision,
-    context_recall,
-    faithfulness,
-    answer_relevancy,
-    answer_correctness,
-)
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from ragas import evaluate
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.llms import LangchainLLMWrapper
+from ragas.metrics import answer_correctness, answer_relevancy, context_precision, context_recall, faithfulness
+
+from eval_utils import (
+    RAGAS_METRICS,
+    answer_fingerprint,
+    atomic_json_write,
+    exception_contains,
+    load_json_strict,
+    merge_ragas_scores,
+    numeric_mean,
+    ragas_dataset_rows,
+    result_rows,
+    scores_complete,
+    valid_score_count,
+    validate_output_path,
+    validate_answer_rows,
+)
+from key_pool import AllKeysExhausted, GroqKeyPool, GroqPoolChatModel
 
 
-def mean(xs):
-    xs = [x for x in xs if x is not None and not (isinstance(x, float) and math.isnan(x))]
-    return float(np.mean(xs)) if xs else 0.0
+def parse_args():
+    parser = argparse.ArgumentParser(description="Resume Ragas scoring from generated answer records")
+    parser.add_argument("--input", default=str(EVALS / "ragas_results.json"))
+    parser.add_argument("--output", default=str(EVALS / "ragas_metrics_results.json"))
+    parser.add_argument("--max-wait", type=float, default=90.0,
+                        help="legacy pool setting; long temporary waits remain cooldowns")
+    return parser.parse_args()
 
 
 def main():
-    results_path = Path(__file__).parent / "ragas_results.json"
-    data = json.loads(results_path.read_text(encoding="utf-8"))
-    per_question = data["per_question"]
-    retrieval_rows = data.get("retrieval_rows", [])
+    args = parse_args()
+    input_path, output_path = Path(args.input).resolve(), Path(args.output).resolve()
+    validate_output_path(output_path)
+    if input_path == output_path:
+        raise SystemExit("Refusing to overwrite the Ragas input file; choose a separate --output path")
 
-    print(f"Loaded {len(per_question)} questions for Ragas scoring")
+    data = load_json_strict(input_path)
+    if not isinstance(data, dict) or "per_question" not in data or "summary" not in data:
+        raise SystemExit(f"{input_path.name} must contain summary and per_question")
+    per_question = validate_answer_rows(data["per_question"], input_path.name)
+    if not per_question:
+        raise SystemExit("No answer-bearing question records to score")
+    summary_in = data["summary"]
+    required_summary = ("embedding_model", "groq_model")
+    missing = [field for field in required_summary if not summary_in.get(field)]
+    if missing:
+        raise SystemExit(f"Input summary is missing required fields: {', '.join(missing)}")
+    source_fingerprint = answer_fingerprint(per_question, summary_in)
 
-    emb_model = GoogleGenerativeAIEmbeddings(
-        model=data["summary"]["embedding_model"],
-        google_api_key=os.getenv("GEMINI_API_KEY"),
-    )
+    # Resume from the output artifact only when it belongs to the same input.
+    if output_path.exists():
+        previous = load_json_strict(output_path)
+        if previous.get("source_input") != str(input_path) or previous.get("source_fingerprint") != source_fingerprint:
+            raise SystemExit(f"Existing output {output_path.name} belongs to different input data; choose another output")
+        previous_rows = validate_answer_rows(previous.get("per_question", []), output_path.name)
+        old_by_id = {str(row["id"]): row for row in previous_rows}
+        # Keep original input fields authoritative while carrying metric fields forward.
+        merged = []
+        for original in per_question:
+            row = dict(original)
+            old = old_by_id.get(str(original["id"]), {})
+            for metric in RAGAS_METRICS:
+                if old.get(metric) is not None:
+                    row[metric] = old[metric]
+            merged.append(row)
+        per_question = merged
 
-    eval_ds = Dataset.from_list(per_question)
-
-    ragas_llm = LangchainLLMWrapper(
-        ChatGroq(
-            model=data["summary"]["groq_model"],
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-            temperature=0.2,
-        )
-    )
-    ragas_emb = LangchainEmbeddingsWrapper(emb_model)
-
+    pool = GroqKeyPool(max_wait=args.max_wait)
+    chat_model = GroqPoolChatModel(pool=pool, model=summary_in["groq_model"], temperature=0.2)
+    ragas_llm = LangchainLLMWrapper(chat_model)
     metrics = [context_precision, context_recall, faithfulness, answer_relevancy, answer_correctness]
-    result = evaluate(
-        dataset=eval_ds,
-        metrics=metrics,
-        llm=ragas_llm,
-        embeddings=ragas_emb,
-        show_progress=True,
-        column_map={
-            "user_input": "question",
-            "response": "response",
-            "retrieved_contexts": "retrieved_contexts",
-            "reference": "reference",
-            "reference_contexts": "reference_contexts",
-        },
-    )
 
-    try:
-        df = result.to_pandas()
-    except Exception:
-        df = result
+    output = {
+        **data,
+        "source_input": str(input_path),
+        "source_fingerprint": source_fingerprint,
+        "per_question": per_question,
+        "summary": {**summary_in, "ragas_scored_n": 0, "aggregate": dict(summary_in.get("aggregate", {}))},
+    }
 
-    if hasattr(df, "to_dict"):
-        ragas_scores = df.to_dict(orient="records")
-    elif isinstance(df, dict):
-        ragas_scores = [df]
-    else:
-        ragas_scores = list(df)
-
-    score_by_question = {}
-    for rec in ragas_scores:
-        qtext = rec.get("user_input") or rec.get("question")
-        if qtext:
-            score_by_question[qtext] = rec
-
-    for row in per_question:
-        rec = score_by_question.get(row["question"], {})
-        for m in ["context_precision", "context_recall", "faithfulness", "answer_relevancy", "answer_correctness"]:
-            row[m] = rec.get(m)
-
-    # ---- aggregate ----
-    topks = [1, 3, 5, 8, 10]
-    agg = {}
-    for k in topks:
-        hit_key = f"hit@{k}"
-        rec_key = f"recall@{k}"
-        prec_key = f"precision@{k}"
-        if retrieval_rows and hit_key in retrieval_rows[0]:
-            agg[f"retrieval_hit@{k}"] = mean([r[hit_key] for r in retrieval_rows])
-            agg[f"retrieval_recall@{k}"] = mean([r[rec_key] for r in retrieval_rows])
-            agg[f"retrieval_precision@{k}"] = mean([r[prec_key] for r in retrieval_rows])
-    agg["retrieval_mrr"] = mean([r["mrr"] for r in retrieval_rows])
-
-    for metric in ["context_precision", "context_recall", "faithfulness", "answer_relevancy", "answer_correctness"]:
-        vals = []
-        for row in per_question:
-            v = row.get(metric)
-            if v is not None and not (isinstance(v, float) and math.isnan(v)):
-                vals.append(v)
-        agg[f"ragas_{metric}"] = mean(vals)
-
-    # per-question combined (clean output)
-    combined = []
-    for r in retrieval_rows:
-        row = {
-            "id": r["id"],
-            "type": r["type"],
-            "difficulty": r["difficulty"],
-            "answerable": r["answerable"],
-            **{k: v for k, v in r.items() if k.startswith(("hit@", "recall@", "precision@", "mrr", "gold", "retrieved", "first_relevant_rank"))},
+    def save():
+        scored = [row for row in per_question if scores_complete(row)]
+        aggregate = dict(summary_in.get("aggregate", {}))
+        for metric in RAGAS_METRICS:
+            aggregate[f"ragas_{metric}"] = numeric_mean([row.get(metric) for row in per_question])
+            aggregate[f"ragas_{metric}_n"] = valid_score_count([row.get(metric) for row in per_question])
+        output["per_question"] = per_question
+        output["source_fingerprint"] = source_fingerprint
+        output["summary"] = {
+            **summary_in,
+            "ragas_scored_n": len(scored),
+            "aggregate": aggregate,
         }
-        qrow = next((x for x in per_question if x["id"] == r["id"]), None)
-        if qrow:
-            for m in ["context_precision", "context_recall", "faithfulness", "answer_relevancy", "answer_correctness"]:
-                row[m] = qrow.get(m)
-        combined.append(row)
+        atomic_json_write(output_path, output)
 
-    summary = {
-        "embedding_model": data["summary"]["embedding_model"],
-        "groq_model": data["summary"]["groq_model"],
-        "gemini_fallback_model": data["summary"]["gemini_fallback_model"],
-        "top_k": data["summary"]["top_k"],
-        "num_questions": data["summary"]["num_questions"],
-        "num_chunks": data["summary"]["num_chunks"],
-        "aggregate": agg,
-    }
+    save()
+    exhausted = False
+    for position, row in enumerate(per_question, 1):
+        if scores_complete(row):
+            continue
+        print(f"[{position}/{len(per_question)}] Ragas question {row['id']}", flush=True)
+        try:
+            ragas_embeddings = LangchainEmbeddingsWrapper(
+                GoogleGenerativeAIEmbeddings(
+                    model=summary_in["embedding_model"], google_api_key=os.getenv("GEMINI_API_KEY")
+                )
+            )
+            dataset = Dataset.from_list(ragas_dataset_rows([row]))
+            result = evaluate(
+                dataset=dataset,
+                metrics=metrics,
+                llm=ragas_llm,
+                embeddings=ragas_embeddings,
+                show_progress=False,
+                raise_exceptions=True,
+                column_map={
+                    "user_input": "question",
+                    "response": "response",
+                    "retrieved_contexts": "retrieved_contexts",
+                    "reference": "reference",
+                    "reference_contexts": "reference_contexts",
+                },
+            )
+            per_question[:] = merge_ragas_scores(per_question, result_rows(result, [row]))
+            save()
+        except AllKeysExhausted:
+            save()
+            print(f"All daily Groq keys are exhausted. Progress saved to {output_path}.", flush=True)
+            exhausted = True
+            break
+        except Exception as error:
+            save()
+            print(f"Ragas question {row['id']} skipped ({error}); will retry on next run.", flush=True)
+            continue
 
-    out = {
-        "summary": summary,
-        "per_question": combined,
-        "retrieval_rows": retrieval_rows,
-    }
-    results_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    # ---- print summary ----
-    print("\n========== RETRIEVAL (direct) ==========")
-    print(f"N questions: {data['summary']['num_questions']}")
-    for k in topks:
-        print(f"  hit@{k:2d}:   {agg[f'retrieval_hit@{k}']:.3f}")
-        print(f"  recall@{k:2d}: {agg[f'retrieval_recall@{k}']:.3f}")
-        print(f"  precision@{k:2d}: {agg[f'retrieval_precision@{k}']:.3f}")
-    print(f"  MRR:            {agg['retrieval_mrr']:.3f}")
-
-    print("\n========== RAGAS (answer quality) ==========")
-    for m in ["context_precision", "context_recall", "faithfulness", "answer_relevancy", "answer_correctness"]:
-        print(f"  {m:24s}: {agg[f'ragas_{m}']:.3f}")
-
-    print(f"\nWrote {results_path}")
-    print("\nResume-ready headline:")
-    top_k = data["summary"]["top_k"]
-    print(f"  Retrieval hit@{top_k}: {agg[f'retrieval_hit@{top_k}']:.3f} | "
-          f"MRR: {agg['retrieval_mrr']:.3f} | "
-          f"Ragas answer_correctness: {agg['ragas_answer_correctness']:.3f} | "
-          f"Ragas faithfulness: {agg['ragas_faithfulness']:.3f}")
+    if exhausted:
+        return
+    if not all(scores_complete(row) for row in per_question):
+        print(f"Progress saved to {output_path}. Run again to score remaining questions.", flush=True)
+        return
+    print(f"Ragas scores saved to {output_path}")
 
 
 if __name__ == "__main__":
