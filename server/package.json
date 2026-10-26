@@ -37,7 +37,6 @@
     "pdf-parse": "^2.4.0"
   },
   "devDependencies": {
-    "@rolldown/binding-win32-x64-msvc": "^1.2.15",
     "nodemon": "^3.1.14",
     "prisma": "^6.19.3",
     "vitest": "^5.0.5"
