@@ -28,4 +28,13 @@ jobs:
         run: npm ci
 
       - name: Run server tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test
+          DIRECT_URL: postgresql://test:test@localhost:5432/test
+          UPSTASH_REDIS_URL: redis://localhost:1/test
+          GEMINI_API_KEY: test-key
+          CLERK_PUBLISHABLE_KEY: pk_test
+          CLERK_SECRET_KEY: sk_test
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: test-key
         run: npm test
