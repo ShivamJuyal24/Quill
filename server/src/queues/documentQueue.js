@@ -4,8 +4,11 @@ import { bullConnection } from '../config/redis.js';
 export const QUEUE_NAME = 'document-queue';
 export const JOB_NAME = 'process-document';
 
-/** Producer side of the pipeline; used by the API to enqueue uploads. */
-export const documentQueue = new Queue(QUEUE_NAME, { connection: bullConnection });
+/** In test mode, use a mock queue to avoid creating real Redis connections. */
+export const documentQueue =
+  process.env.NODE_ENV === 'test'
+    ? { add: async () => ({ id: 'mock-job-id' }), close: async () => {} }
+    : new Queue(QUEUE_NAME, { connection: bullConnection });
 
 export function enqueueDocumentJob(data) {
   return documentQueue.add(JOB_NAME, data, {

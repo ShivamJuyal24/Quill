@@ -51,7 +51,13 @@ function fuseRRF(vectorList, keywordList, limit, k = 60) {
     });
 }
 
-export const chat = async (req, res) => {
+export const chat = async (req, res, prismaInstance = prisma) => {
+  // Express invokes route handlers as fn(req, res, next), so the third
+  // argument is the `next` function in production. Fall back to the module
+  // Prisma client unless a test explicitly injected a real client object.
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
   const requestId = req.headers['x-request-id'];
   const startedAt = process.hrtime.bigint();
   res.once('finish', () => {
@@ -78,7 +84,7 @@ export const chat = async (req, res) => {
 
   // Ownership + readiness check — a not-yet-processed document has no
   // embeddings to retrieve from yet.
-  const document = await timed('chat.document-ownership-check', () => prisma.document.findFirst({
+  const document = await timed('chat.document-ownership-check', () => prismaInstance.document.findFirst({
     where: { id: documentId, userId },
     select: { id: true, originalName: true, status: true, errorMessage: true },
   }), { requestId, documentId });
@@ -95,7 +101,7 @@ export const chat = async (req, res) => {
   // Embedding and history are independent after the ownership check.
   const [questionVectors, history] = await Promise.all([
     timed('chat.question-embedding', () => embedTexts([message.trim()]), { requestId, documentId }),
-    timed('chat.history-fetch', () => prisma.chatMessage.findMany({
+    timed('chat.history-fetch', () => prismaInstance.chatMessage.findMany({
       where: { documentId, userId },
       orderBy: { createdAt: 'desc' },
       take: 10,
@@ -107,7 +113,7 @@ export const chat = async (req, res) => {
   // 2. Retrieve chunks via hybrid search: vector (semantic) + full-text (lexical),
   //    fused with Reciprocal Rank Fusion (RRF). Falls back to vector-only when
   //    hybrid search is disabled or full-text search returns nothing.
-  const vectorChunks = await timed('chat.vector-search', () => prisma.$queryRaw`
+  const vectorChunks = await timed('chat.vector-search', () => prismaInstance.$queryRaw`
     SELECT id, content, 1 - (embedding <=> ${questionVector}::vector) AS similarity
     FROM document_chunks
     WHERE document_id = ${documentId} AND embedding IS NOT NULL
@@ -117,7 +123,7 @@ export const chat = async (req, res) => {
 
   let keywordChunks = [];
   if (env.hybridSearchEnabled === 'true') {
-    keywordChunks = await timed('chat.keyword-search', () => prisma.$queryRaw`
+    keywordChunks = await timed('chat.keyword-search', () => prismaInstance.$queryRaw`
       SELECT id, content, ts_rank(content_tsv, plainto_tsquery('english', ${message.trim()})) AS rank
       FROM document_chunks
       WHERE document_id = ${documentId} AND content_tsv @@ plainto_tsquery('english', ${message.trim()})
@@ -141,11 +147,11 @@ export const chat = async (req, res) => {
   }), { requestId, documentId, contextChunkCount: chunks.length });
 
   // 4. Persist the exchange so the conversation survives reloads.
-  const [, assistantMessage] = await timed('chat.message-persistence', () => prisma.$transaction([
-    prisma.chatMessage.create({
+  const [, assistantMessage] = await timed('chat.message-persistence', () => prismaInstance.$transaction([
+    prismaInstance.chatMessage.create({
       data: { documentId, userId, role: 'USER', content: message.trim() },
     }),
-    prisma.chatMessage.create({
+    prismaInstance.chatMessage.create({
       data: { documentId, userId, role: 'ASSISTANT', content: answer },
     }),
   ]), { requestId, documentId });

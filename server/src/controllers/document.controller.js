@@ -3,8 +3,14 @@ import { deletePdf } from '../services/storage.service.js';
 import { ApiError, notFoundError } from '../utils/errors.js';
 
 /** Every query is scoped by userId — one user can never read another user's documents. */
-async function getOwnedDocument(userId, documentId) {
-  const document = await prisma.document.findFirst({
+async function getOwnedDocument(userId, documentId, prismaInstance = prisma) {
+  // Express invokes route handlers as fn(req, res, next), so the third
+  // argument is the `next` function in production. Fall back to the module
+  // Prisma client unless a test explicitly injected a real client object.
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
+  const document = await prismaInstance.document.findFirst({
     where: { id: documentId, userId },
     include: { _count: { select: { chunks: true, messages: true } } },
   });
@@ -12,8 +18,11 @@ async function getOwnedDocument(userId, documentId) {
   return document;
 }
 
-export const listDocuments = async (req, res) => {
-  const documents = await prisma.document.findMany({
+export const listDocuments = async (req, res, prismaInstance = prisma) => {
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
+  const documents = await prismaInstance.document.findMany({
     where: { userId: req.userId },
     orderBy: { createdAt: 'desc' },
     select: {
@@ -30,16 +39,22 @@ export const listDocuments = async (req, res) => {
   res.json({ documents });
 };
 
-export const getDocument = async (req, res) => {
-  const document = await getOwnedDocument(req.userId, req.params.id);
+export const getDocument = async (req, res, prismaInstance = prisma) => {
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
+  const document = await getOwnedDocument(req.userId, req.params.id, prismaInstance);
   const { _count, ...rest } = document;
   res.json({ document: { ...rest, chunkCount: _count.chunks, messageCount: _count.messages } });
 };
 
-export const getDocumentMessages = async (req, res) => {
-  await getOwnedDocument(req.userId, req.params.id);
+export const getDocumentMessages = async (req, res, prismaInstance = prisma) => {
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
+  await getOwnedDocument(req.userId, req.params.id, prismaInstance);
 
-  const messages = await prisma.chatMessage.findMany({
+  const messages = await prismaInstance.chatMessage.findMany({
     where: { documentId: req.params.id, userId: req.userId },
     orderBy: { createdAt: 'asc' },
     take: 200,
@@ -49,11 +64,14 @@ export const getDocumentMessages = async (req, res) => {
   res.json({ messages });
 };
 
-export const deleteDocument = async (req, res) => {
-  const document = await getOwnedDocument(req.userId, req.params.id);
+export const deleteDocument = async (req, res, prismaInstance = prisma) => {
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
+  const document = await getOwnedDocument(req.userId, req.params.id, prismaInstance);
 
   // Chunks and chat messages are removed by ON DELETE CASCADE.
-  await prisma.document.delete({ where: { id: document.id } });
+  await prismaInstance.document.delete({ where: { id: document.id } });
 
   // Storage cleanup is best-effort; the DB row is already gone.
   await deletePdf(document.filePath).catch(() => {});
