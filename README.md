@@ -13,7 +13,7 @@ The application has a public landing page, authenticated document-chat workspace
 - ✅ **Phase 5** – Vector Embeddings with pgvector
 - ✅ **Phase 6** – Chat with PDF and Semantic Retrieval
 - ✅ **Phase 7** – Landing Page, Protected Workspace & Processing Status UX
-- ⏳ **Phase 8** – Production Deployment, Monitoring & Automated Tests
+- ✅ **Phase 8** – Production Deployment, Monitoring & Automated Tests
 
 ## 🧠 What This Project Demonstrates
 
@@ -280,7 +280,7 @@ Base URL: `/api/v1`. All routes except `/health` require a Clerk bearer token.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Public readiness probe for PostgreSQL and Redis |
+| GET | `/health` | Public readiness probe for PostgreSQL, Redis, BullMQ, Supabase Storage, Gemini, and Groq |
 | GET | `/me` | Returns the authenticated Clerk user ID |
 | POST | `/upload` | Uploads a PDF and queues processing |
 | GET | `/documents` | Lists the authenticated user's documents |

@@ -8,7 +8,13 @@ import { timed } from '../utils/timed.js';
 
 const PDF_MAGIC_BYTES = '%PDF-';
 
-export const uploadFile = async (req, res) => {
+export const uploadFile = async (req, res, prismaInstance = prisma) => {
+  // Express invokes route handlers as fn(req, res, next), so the third
+  // argument is the `next` function in production. Fall back to the module
+  // Prisma client unless a test explicitly injected a real client object.
+  if (typeof prismaInstance === 'function') {
+    prismaInstance = prisma;
+  }
   const requestId = req.headers['x-request-id'];
   const startedAt = process.hrtime.bigint();
   res.once('finish', () => {
@@ -51,7 +57,7 @@ export const uploadFile = async (req, res) => {
 
   try {
     logger.info('Creating document record', { documentId, userId });
-    const document = await timed('upload.document-create', () => prisma.document.create({
+    const document = await timed('upload.document-create', () => prismaInstance.document.create({
       data: {
         id: documentId,
         userId,
@@ -72,7 +78,7 @@ export const uploadFile = async (req, res) => {
       logger.info('Document processing job queued', { documentId });
     } catch (err) {
       logger.error('Failed to enqueue document job', { documentId, message: err.message, stack: err.stack });
-      await prisma.document.update({
+      await prismaInstance.document.update({
         where: { id: documentId },
         data: { status: 'FAILED', errorMessage: 'Upload accepted but processing could not be queued.' },
       });
