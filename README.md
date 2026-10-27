@@ -484,15 +484,15 @@ Retrieval and answer quality were measured offline on a gold dataset of **50 que
 
 ### Retrieval: vector-only vs hybrid (vector + keyword + RRF)
 
-| Metric | Vector-only (before) | Hybrid (after) | Change |
-|---|---|---|---|
-| **hit@1** | 0.540 | **0.640** | **+18.5%** |
-| **hit@3** | 0.800 | **0.860** | +7.5% |
-| **hit@5** | 0.900 | **0.920** | +2.2% |
-| **hit@8** | 0.920 | **0.920** | 0.0% |
-| **MRR@8** | 0.687 | **0.753** | **+9.6%** |
-| **recall@8** | 0.862 | 0.853 | -1.0% |
-| **precision@8** | 0.172 | 0.170 | -1.4% |
+| Metric | Vector-only (before) | Hybrid (after) | Hybrid + Rerank (top-4) | Change |
+|---|---|---|---|---|
+| **hit@1** | 0.540 | **0.640** | **0.820** | **+18.5%** |
+| **hit@3** | 0.800 | **0.860** | **0.940** | +7.5% |
+| **hit@5** | 0.900 | **0.920** | **0.940** | +2.2% |
+| **hit@8** | 0.920 | **0.920** | **0.940** | 0.0% |
+| **MRR@8** | 0.687 | **0.753** | **0.877** | **+9.6%** |
+| **recall@8** | 0.862 | 0.853 | 0.858 | -1.0% |
+| **precision@8** | 0.172 | 0.170 | 0.165 | -1.4% |
 
 Hybrid search = vector search (cosine similarity over `embedding`) **+** full-text keyword search (PostgreSQL `tsvector` + GIN index) fused with **Reciprocal Rank Fusion (RRF)**. The most relevant chunk is far more likely to appear at rank 1 (hit@1 +18.5%), and overall ranking quality improves (MRR +9.6%), with no regression on hit@8.
 
