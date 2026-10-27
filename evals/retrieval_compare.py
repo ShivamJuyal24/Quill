@@ -190,7 +190,7 @@ def main():
     )
     parser.add_argument(
         "--embedding-model",
-        default=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2"),
+        default=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
     )
     parser.add_argument("--cache", default=str(Path(__file__).parent / ".compare_cache.json"))
     parser.add_argument("--no-cache", action="store_true")
@@ -215,7 +215,9 @@ def main():
     print(f"Embedding model: {args.embedding_model}")
 
     embedder = GoogleGenerativeAIEmbeddings(
-        model=args.embedding_model, google_api_key=os.getenv("GEMINI_API_KEY")
+        model=args.embedding_model,
+        google_api_key=os.getenv("GEMINI_API_KEY"),
+        output_dimensionality=3072,
     )
 
     # ---- cache / embed chunks ----

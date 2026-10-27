@@ -79,7 +79,7 @@ def parse_args():
     )
     p.add_argument(
         "--embedding-model",
-        default=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2"),
+        default=os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
     )
     p.add_argument("--groq-model", default=os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile"))
     p.add_argument("--gemini-model", default=os.getenv("GEMINI_CHAT_MODEL", "gemini-2.0-flash"))

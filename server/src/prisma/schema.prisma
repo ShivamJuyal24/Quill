@@ -49,9 +49,8 @@ model DocumentChunk {
   content    String
   // pgvector column — Prisma Client can't read/write this type directly.
   // All access to `embedding` goes through prisma.$queryRaw / $executeRaw.
-  // The 3072-dimensional Gemini Embedding 2 vectors use exact vector search;
-  // pgvector HNSW indexes support at most 2000 dimensions.
-  embedding  Unsupported("vector(3072)")?
+   // The 3072-dimensional Gemini gemini-embedding-001 vectors use exact cosine search.
+   embedding  Unsupported("vector(3072)")?
   // Full-text search column — populated by a generated column in the migration.
   // Prisma can't manage tsvector directly, so it's read-only via $queryRaw.
   contentTsv Unsupported("tsvector")?
