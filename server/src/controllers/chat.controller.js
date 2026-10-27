@@ -1,6 +1,7 @@
 import { prisma } from '../config/prisma.js';
 import { env } from '../config/env.js';
 import { embedTexts, generateAnswer } from '../services/gemini.service.js';
+import { rerankChunks } from '../services/reranker.service.js';
 import { ApiError } from '../utils/errors.js';
 import { timed } from '../utils/timed.js';
 import { logger } from '../utils/logger.js';
@@ -132,7 +133,8 @@ export const chat = async (req, res, prismaInstance = prisma) => {
     `, { requestId, documentId, topK: env.topKChunks * 2 });
   }
 
-  const chunks = fuseRRF(vectorChunks, keywordChunks, env.topKChunks, env.rrfK);
+  const fused = fuseRRF(vectorChunks, keywordChunks, env.topKChunks * 2, env.rrfK);
+  const chunks = await timed('chat.rerank', () => rerankChunks(message.trim(), fused, 4), { requestId, documentId });
 
   if (chunks.length === 0) {
     throw new ApiError(503, 'No searchable content is available for this document yet. Please try again shortly.');

@@ -496,6 +496,19 @@ Retrieval and answer quality were measured offline on a gold dataset of **50 que
 
 Hybrid search = vector search (cosine similarity over `embedding`) **+** full-text keyword search (PostgreSQL `tsvector` + GIN index) fused with **Reciprocal Rank Fusion (RRF)**. The most relevant chunk is far more likely to appear at rank 1 (hit@1 +18.5%), and overall ranking quality improves (MRR +9.6%), with no regression on hit@8.
 
+### Retrieval: + Cohere rerank (top-4)
+
+| Metric | Hybrid (before) | Hybrid + Rerank (after) | Change |
+|---|---|---|---|
+| **hit@1** | 0.640 | **0.820** | **+28.1%** |
+| **hit@3** | 0.860 | **0.940** | +9.3% |
+| **hit@5** | 0.920 | **0.940** | +2.2% |
+| **hit@8** | 0.920 | **0.940** | +2.2% |
+| **MRR@8** | 0.753 | **0.877** | **+16.4%** |
+| **recall@8** | 0.853 | 0.858 | +0.6% |
+
+After RRF fusion, the top candidates are re-scored by a Cohere cross-encoder reranker (`rerank-english-v3.0`), returning the top-4 chunks. This lifts MRR@8 from 0.753 to 0.877 (+16.4%) and hit@1 from 0.640 to 0.820. Reranking is applied in `chat.controller.js` via `reranker.service.js`; if `COHERE_API_KEY` is unset or the call fails, it falls back to the fused order.
+
 Hybrid search is enabled by default (`HYBRID_SEARCH_ENABLED=true`, `RRF_K=60`). Set `HYBRID_SEARCH_ENABLED=false` for vector-only.
 
 ### Answer quality: Ragas
