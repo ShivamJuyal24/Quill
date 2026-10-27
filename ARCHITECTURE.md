@@ -379,6 +379,7 @@ Progress reported via `job.updateProgress` (30/55/80/100).
   - `score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)`, default `k=60` (`RRF_K`).
   - Fetches `TOP_K_CHUNKS * 2` from each list, fuses, returns top `TOP_K_CHUNKS` (default 8).
   - Controlled by `HYBRID_SEARCH_ENABLED` (default `true`); set to `false` for vector-only.
+- **Retrieval — rerank:** fused candidates are re-scored by Cohere `rerank-english-v3.0` (cross-encoder) and truncated to top-4. Implemented in `reranker.service.js`; falls back to fused order if `COHERE_API_KEY` is unset or the call fails.
 - **Exact vector search:** HNSW not used because pgvector HNSW max is 2000 dims; revisit with IVFFlat or model change at scale.
 - **Compatibility constraint:** embedding model and `vector(3072)` column must stay in sync; changing models requires regenerating all embeddings and altering the column.
 - **Question embedding** uses the same model to keep vector spaces aligned.
