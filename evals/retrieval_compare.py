@@ -15,6 +15,8 @@ import argparse
 import json
 import math
 import os
+import time
+import requests
 import re
 import sys
 from collections import Counter
@@ -314,7 +316,63 @@ def main():
             hyb_results.append(row)
         results[f"hybrid_rrf_{rrf_k}"] = hyb_results
 
-    # ---- aggregate & print ----
+    # Strategy 3: Hybrid + Cohere rerank (top-4)
+    cohere_key = os.getenv("COHERE_API_KEY")
+    if cohere_key:
+        print("\n=== Strategy: Hybrid + Rerank (top-4) ===")
+        rerank_results = []
+        for qi, q in enumerate(questions):
+            gold = set(q["all_expected_chunk_ids"])
+            q_text = q["question"]
+
+            vec_order, _ = cosine_topk(q_vecs[qi], chunk_matrix, max(topks) * 3)
+            kw_order, _ = keyword_topk(q_text, chunk_texts, max(topks) * 3)
+            fused = fuse_rrf(vec_order, kw_order, chunk_ids, k=60, limit=max(topks) * 3)
+            candidate_ids = [chunk_ids[i] for i in fused]
+            candidate_texts = [chunk_texts[chunk_ids.index(cid)] for cid in candidate_ids]
+
+            # Cohere rerank
+            reranked_ids = None
+            for attempt in range(3):
+                try:
+                    resp = requests.post(
+                        "https://api.cohere.com/v2/rerank",
+                        headers={"Authorization": f"Bearer {cohere_key}", "Content-Type": "application/json"},
+                        json={
+                            "model": os.getenv("COHERE_RERANK_MODEL", "rerank-english-v3.0"),
+                            "query": q_text,
+                            "documents": candidate_texts,
+                            "top_n": 4,
+                        },
+                        timeout=30,
+                    )
+                    if resp.status_code == 429:
+                        time.sleep(7)
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    reranked_ids = [candidate_ids[r["index"]] for r in data.get("results", [])]
+                    break
+                except Exception as e:
+                    print(f"  rerank failed: {e}")
+                    time.sleep(7)
+            if not reranked_ids:
+                reranked_ids = candidate_ids[:4]
+
+            retrieved = reranked_ids
+            time.sleep(6.5)
+            row = {"id": q["id"], "type": q["type"], "difficulty": q["difficulty"],
+                   "retrieved": retrieved, "gold": sorted(gold)}
+            for k in topks:
+                h, r, p, m = evaluate(retrieved, gold, k)
+                row[f"hit@{k}"] = h
+                row[f"recall@{k}"] = r
+                row[f"precision@{k}"] = p
+                row[f"mrr@{k}"] = m
+            rerank_results.append(row)
+        results["hybrid_rerank"] = rerank_results
+    else:
+        print("\nCOHERE_API_KEY not set; skipping rerank strategy.")
     def agg(rows, key):
         return mean([r[key] for r in rows])
 
@@ -323,7 +381,9 @@ def main():
     print("-" * 60)
 
     strategies = ["vector_only"] + [f"hybrid_rrf_{rk}" for rk in rrf_ks]
-    labels = {"vector_only": "vector", **{f"hybrid_rrf_{rk}": f"hybrid{rk}" for rk in rrf_ks}}
+    if "hybrid_rerank" in results:
+        strategies.append("hybrid_rerank")
+    labels = {"vector_only": "vector", **{f"hybrid_rrf_{rk}": f"hybrid{rk}" for rk in rrf_ks}, "hybrid_rerank": "rerank"}
 
     # Build header dynamically
     header_labels = [labels[s] for s in strategies]

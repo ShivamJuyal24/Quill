@@ -54,8 +54,10 @@ export const env = {
   geminiApiKey: process.env.GEMINI_API_KEY,
   geminiEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL ?? 'gemini-embedding-001',
   geminiChatModel: process.env.GEMINI_CHAT_MODEL ?? 'gemini-2.0-flash',
-  groqApiKey: process.env.GROQ_API_KEY,
-  groqChatModel: process.env.GROQ_CHAT_MODEL ?? 'llama-3.3-70b-versatile',
+   groqApiKey: process.env.GROQ_API_KEY,
+   groqChatModel: process.env.GROQ_CHAT_MODEL ?? 'llama-3.3-70b-versatile',
+   cohereApiKey: process.env.COHERE_API_KEY,
+   cohereRerankModel: process.env.COHERE_RERANK_MODEL ?? 'rerank-english-v3.0',
 
   // Clerk
   clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY,

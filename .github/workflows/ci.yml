@@ -1,3 +1,4 @@
+
 name: CI
 
 on:
@@ -9,6 +10,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: ./server
@@ -25,7 +27,7 @@ jobs:
           cache-dependency-path: ./server/package-lock.json
 
       - name: Install server dependencies
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Run server tests
         env:
