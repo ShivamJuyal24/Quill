@@ -50,9 +50,9 @@ export const env = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   supabaseBucket: process.env.SUPABASE_STORAGE_BUCKET ?? 'documents',
 
-  // Gemini embeddings must remain dimension-compatible with vector(3072).
+   // Gemini embeddings must remain dimension-compatible with vector(3072).
   geminiApiKey: process.env.GEMINI_API_KEY,
-  geminiEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL ?? 'gemini-embedding-2',
+  geminiEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL ?? 'gemini-embedding-001',
   geminiChatModel: process.env.GEMINI_CHAT_MODEL ?? 'gemini-2.0-flash',
   groqApiKey: process.env.GROQ_API_KEY,
   groqChatModel: process.env.GROQ_CHAT_MODEL ?? 'llama-3.3-70b-versatile',

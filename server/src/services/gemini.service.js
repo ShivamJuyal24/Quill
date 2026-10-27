@@ -32,34 +32,29 @@ async function withRetry(fn, { attempts = 3, baseDelayMs = 1500, label = 'Gemini
 
 /**
  * Embeds texts and returns pgvector literals (`"[0.1,0.2,...]"`), one per input,
- * in the same order. The dimensionality must match the `vector(768)` column.
- */
+ * in the same order. Each call requests 3072-dimensional output to match the
+ * `vector(3072)` column. Uses `embedContent` (single) because `batchEmbedContents`
+ * on v1beta does not accept a per-request `config` with `outputDimensionality`. */
 export async function embedTexts(texts) {
   if (texts.length === 0) return [];
 
   const vectorStrings = [];
-  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-    const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-
+  for (const content of texts) {
     const result = await withRetry(
-      () => timed('embedding.batch-request', () =>
-        embeddingModel.batchEmbedContents({
-          requests: batch.map((content) => ({
-            model: `models/${env.geminiEmbeddingModel}`,
-            content: { parts: [{ text: content }] },
-          })),
+      () => timed('embedding.request', () =>
+        embeddingModel.embedContent({
+          content: { parts: [{ text: content }] },
+          output_dimensionality: 3072,
         })),
-      { label: `Embedding batch ${Math.floor(i / EMBED_BATCH_SIZE) + 1}` },
+      { label: 'Embedding request' },
     );
 
-    const embeddings = result?.embeddings ?? [];
-    if (embeddings.length !== batch.length) {
-      throw new Error(`Gemini returned ${embeddings.length} embeddings for ${batch.length} inputs`);
+    const embedding = result?.embedding;
+    if (!embedding) {
+      throw new Error(`Gemini returned no embedding for input`);
     }
 
-    for (const embedding of embeddings) {
-      vectorStrings.push(`[${embedding.values.map(Number).join(',')}]`);
-    }
+    vectorStrings.push(`[${embedding.values.map(Number).join(',')}]`);
   }
 
   return vectorStrings;
