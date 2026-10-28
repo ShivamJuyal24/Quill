@@ -88,6 +88,11 @@ def main():
     pool = GroqKeyPool(max_wait=args.max_wait)
     chat_model = GroqPoolChatModel(pool=pool, model=summary_in["groq_model"], temperature=0.2)
     ragas_llm = LangchainLLMWrapper(chat_model)
+    ragas_embeddings = LangchainEmbeddingsWrapper(
+        GoogleGenerativeAIEmbeddings(
+            model=summary_in["embedding_model"], google_api_key=os.getenv("GEMINI_API_KEY")
+        )
+    )
     metrics = [context_precision, context_recall, faithfulness, answer_relevancy, answer_correctness]
 
     output = {
@@ -120,11 +125,6 @@ def main():
             continue
         print(f"[{position}/{len(per_question)}] Ragas question {row['id']}", flush=True)
         try:
-            ragas_embeddings = LangchainEmbeddingsWrapper(
-                GoogleGenerativeAIEmbeddings(
-                    model=summary_in["embedding_model"], google_api_key=os.getenv("GEMINI_API_KEY")
-                )
-            )
             dataset = Dataset.from_list(ragas_dataset_rows([row]))
             result = evaluate(
                 dataset=dataset,

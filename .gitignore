@@ -30,3 +30,5 @@ evals/ragas_ragas_metrics.json
 # Optional/generated eval outputs
 evals/llm_judge_results.json
 evals/ragas_subset_metrics_results.json
+evals/venv
+evals/venv311
