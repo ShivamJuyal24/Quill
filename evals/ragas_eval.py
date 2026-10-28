@@ -71,7 +71,7 @@ def safe_str(s):
 def parse_args():
     p = argparse.ArgumentParser(description="Ragas offline eval for Quill")
     p.add_argument("--data", default=str(Path(__file__).parent / "rag_eval.json"))
-    p.add_argument("--k", type=int, default=8, help="primary top-K (retrieval + ragas)")
+    p.add_argument("--k", type=int, default=4, help="primary top-K (retrieval + ragas; matches production 4-chunk context)")
     p.add_argument(
         "--topks",
         default="1,3,5,8,10",
@@ -336,12 +336,40 @@ def main():
     sources = [resume_path]
     if output_path != resume_path:
         sources.append(output_path)
-    per_question, loaded_done, done_ids = load_existing_results(sources, all_questions, current_fingerprint)
+    per_question, saved_retrieval_rows, done_ids = load_existing_results(sources, all_questions, current_fingerprint)
     by_id = {str(row["id"]): row for row in per_question}
     per_question = [dict(by_id.get(str(row["id"]), row)) for row in original_rows_by_id.values()] if original_rows_by_id else per_question
     if not original_rows_by_id:
         per_question = [dict(row) for row in per_question]
-    retrieval_rows = [original_retrieval_by_id[str(row["id"])] for row in all_questions if str(row["id"]) in original_retrieval_by_id]
+    retrieval_rows = saved_retrieval_rows if saved_retrieval_rows else []
+    if not retrieval_rows and per_question:
+        # Reconstruct retrieval_rows from per_question data (retrieved_ids, gold_ids, mrr)
+        # when saved retrieval_rows is empty (e.g., rag_eval.json has no retrieval_rows key)
+        for row in per_question:
+            gold = set(row.get("gold_ids", []))
+            retrieved = row.get("retrieved_ids", [])
+            ret_row = {
+                "id": row["id"],
+                "type": row.get("type"),
+                "difficulty": row.get("difficulty"),
+                "answerable": row.get("answerable"),
+                "gold": sorted(gold),
+                "retrieved": retrieved,
+                "first_relevant_rank": None,
+                "mrr": row.get("mrr", 0.0),
+            }
+            for rank, cid in enumerate(retrieved, 1):
+                if cid in gold:
+                    ret_row["first_relevant_rank"] = rank
+                    break
+            for k in topks:
+                topk_ids = set(retrieved[:k])
+                ret_row[f"hit@{k}"] = int(bool(gold & topk_ids)) if gold else 0.0
+                ret_row[f"recall@{k}"] = (len(gold & topk_ids) / len(gold)) if gold else 0.0
+                ret_row[f"precision@{k}"] = (len(gold & topk_ids) / k) if gold else 0.0
+            retrieval_rows.append(ret_row)
+    elif not retrieval_rows:
+        retrieval_rows = [original_retrieval_by_id[str(row["id"])] for row in all_questions if str(row["id"]) in original_retrieval_by_id]
     remaining = [q for q in questions_to_process if str(q["id"]) not in done_ids]
     print(f"Already done: {len(done_ids)}  Remaining: {len(remaining)}")
 
@@ -364,7 +392,7 @@ def main():
 
         # --- generate answer (Groq key pool) ---
         original_row = original_rows_by_id.get(str(qid), {})
-        if original_row.get("retrieved_contexts"):
+        if original_row.get("retrieved_contexts") and not args.no_cache:
             contexts_for_answer = list(original_row["retrieved_contexts"])
             ret_row = None
         else:
@@ -375,9 +403,43 @@ def main():
                 if not args.no_cache:
                     atomic_json_write(cache_path, cache)
             qvec = np.asarray(cache["questions"][question_hash], dtype=np.float32)
-            idxs, sims = cosine_topk(qvec, chunk_matrix, maxk)
+            fetch_pool = max(maxk, 20)
+            idxs, sims = cosine_topk(qvec, chunk_matrix, fetch_pool)
             retrieved_ids = [chunk_ids[i] for i in idxs]
             retrieved_texts = [chunk_by_id[c] for c in retrieved_ids]
+            cohere_key = os.getenv("COHERE_API_KEY")
+            print(f"  [rerank] key present: {bool(cohere_key)}")
+            if cohere_key:
+                import time as _time
+                import cohere as _cohere
+                _client = _cohere.Client(cohere_key)
+                # Respect Cohere free tier: 10 requests/minute → ≥6s between calls.
+                _time.sleep(6.5)
+                for _attempt in range(3):
+                    try:
+                        _resp = _client.rerank(
+                            model=os.getenv("COHERE_RERANK_MODEL", "rerank-english-v3.0"),
+                            query=question,
+                            documents=retrieved_texts,
+                            top_n=4,
+                        )
+                        _ranked = [retrieved_ids[r.index] for r in (_resp.results or [])]
+                        if _ranked:
+                            retrieved_ids = _ranked
+                            retrieved_texts = [chunk_by_id[c] for c in retrieved_ids]
+                        break
+                    except Exception as _e:
+                        msg = str(_e)
+                        if _attempt == 2:
+                            print(f"  [rerank failed: {_e}]")
+                        elif "429" in msg or "rate" in msg.lower() or "quota" in msg.lower():
+                            _delay = min(2 ** (_attempt + 2), 30)
+                            print(f"  [rerank rate-limited, retry {_attempt+1}/3 in {_delay}s]")
+                            _time.sleep(_delay)
+                        else:
+                            _delay = [4, 6][_attempt]
+                            print(f"  [rerank retry {_attempt+1}/3 in {_delay}s]")
+                            _time.sleep(_delay)
 
             # retrieval metrics (computed directly; only saved once the answer exists)
             ret_row = {

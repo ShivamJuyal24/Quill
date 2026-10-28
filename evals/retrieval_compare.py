@@ -212,6 +212,7 @@ def main():
 
     chunk_ids = [c["chunk_id"] for c in chunks]
     chunk_texts = [c["text"] for c in chunks]
+    chunk_id_to_text = dict(zip(chunk_ids, chunk_texts))
 
     print(f"Chunks: {len(chunks)}  Questions: {len(questions)}")
     print(f"Embedding model: {args.embedding_model}")
@@ -329,7 +330,7 @@ def main():
             kw_order, _ = keyword_topk(q_text, chunk_texts, max(topks) * 3)
             fused = fuse_rrf(vec_order, kw_order, chunk_ids, k=60, limit=max(topks) * 3)
             candidate_ids = [chunk_ids[i] for i in fused]
-            candidate_texts = [chunk_texts[chunk_ids.index(cid)] for cid in candidate_ids]
+            candidate_texts = [chunk_id_to_text[cid] for cid in candidate_ids]
 
             # Cohere rerank
             reranked_ids = None

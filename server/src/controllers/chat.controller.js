@@ -119,8 +119,8 @@ export const chat = async (req, res, prismaInstance = prisma) => {
     FROM document_chunks
     WHERE document_id = ${documentId} AND embedding IS NOT NULL
     ORDER BY embedding <=> ${questionVector}::vector
-    LIMIT ${env.topKChunks * 2}
-  `, { requestId, documentId, topK: env.topKChunks * 2 });
+    LIMIT ${env.topKChunks * 3}
+  `, { requestId, documentId, topK: env.topKChunks * 3 });
 
   let keywordChunks = [];
   if (env.hybridSearchEnabled === 'true') {
@@ -129,11 +129,11 @@ export const chat = async (req, res, prismaInstance = prisma) => {
       FROM document_chunks
       WHERE document_id = ${documentId} AND content_tsv @@ plainto_tsquery('english', ${message.trim()})
       ORDER BY rank DESC
-      LIMIT ${env.topKChunks * 2}
-    `, { requestId, documentId, topK: env.topKChunks * 2 });
+      LIMIT ${env.topKChunks * 3}
+    `, { requestId, documentId, topK: env.topKChunks * 3 });
   }
 
-  const fused = fuseRRF(vectorChunks, keywordChunks, env.topKChunks * 2, env.rrfK);
+  const fused = fuseRRF(vectorChunks, keywordChunks, env.topKChunks * 3, env.rrfK);
   const chunks = await timed('chat.rerank', () => rerankChunks(message.trim(), fused, 4), { requestId, documentId });
 
   if (chunks.length === 0) {
@@ -162,7 +162,7 @@ export const chat = async (req, res, prismaInstance = prisma) => {
     messageId: assistantMessage.id,
     documentId,
     answer,
-    sources: chunks.slice(0, 4).map((chunk) => ({
+    sources: chunks.map((chunk) => ({
       id: chunk.id,
       similarity: Number(chunk.similarity),
       snippet: chunk.content.slice(0, 200),

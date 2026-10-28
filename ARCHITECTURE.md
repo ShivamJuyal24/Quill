@@ -338,7 +338,7 @@ Progress reported via `job.updateProgress` (30/55/80/100).
      FROM document_chunks
      WHERE document_id = $id AND embedding IS NOT NULL
      ORDER BY embedding <=> $q::vector
-     LIMIT $topK * 2
+     LIMIT $topK * 3
      ```
    - **Keyword search** — PostgreSQL full-text search on `content_tsv` (GIN index):
      ```sql
@@ -346,9 +346,9 @@ Progress reported via `job.updateProgress` (30/55/80/100).
      FROM document_chunks
      WHERE document_id = $id AND content_tsv @@ plainto_tsquery('english', $q)
      ORDER BY rank DESC
-     LIMIT $topK * 2
+     LIMIT $topK * 3
      ```
-   - **RRF fusion** — `score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)` (default `k=60`, `TOP_K_CHUNKS=8`). Items appearing in both lists are boosted. Falls back to vector-only when `HYBRID_SEARCH_ENABLED=false`.
+   - **RRF fusion** — `score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)` (default `k=60`, `TOP_K_CHUNKS=8`). Items appearing in both lists are boosted. Falls back to vector-only when `HYBRID_SEARCH_ENABLED=false`. Fused pool is `TOP_K_CHUNKS * 3` (24 candidates), then Cohere re-ranks down to top-4 for the LLM context.
 5. If no chunks → 503.
 6. `generateAnswer({documentTitle, question, contextChunks, history})`:
    - Build numbered context `[1]..[n]`.
@@ -377,7 +377,7 @@ Progress reported via `job.updateProgress` (30/55/80/100).
 - **Batching:** embedding API calls batched at 100 texts; worker inserts chunks in batches of 200.
 - **Retrieval — hybrid:** vector search (cosine distance `<=>`) **+** full-text search (PostgreSQL `tsvector` + GIN index) fused with **Reciprocal Rank Fusion (RRF)**.
   - `score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)`, default `k=60` (`RRF_K`).
-  - Fetches `TOP_K_CHUNKS * 2` from each list, fuses, returns top `TOP_K_CHUNKS` (default 8).
+  - Fetches `TOP_K_CHUNKS * 3` from each list, fuses, then Cohere re-ranks down to top-4 for the LLM context.
   - Controlled by `HYBRID_SEARCH_ENABLED` (default `true`); set to `false` for vector-only.
 - **Retrieval — rerank:** fused candidates are re-scored by Cohere `rerank-english-v3.0` (cross-encoder) and truncated to top-4. Implemented in `reranker.service.js`; falls back to fused order if `COHERE_API_KEY` is unset or the call fails.
 - **Exact vector search:** HNSW not used because pgvector HNSW max is 2000 dims; revisit with IVFFlat or model change at scale.
@@ -454,13 +454,25 @@ Client env: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_S
 | hit@8 | 0.920 | 0.920 | 0.0% |
 | MRR@8 | 0.687 | 0.753 | +9.6% |
 
-Hybrid search = vector search + PostgreSQL full-text search (tsvector + GIN) fused with Reciprocal Rank Fusion (RRF, k=60). Full results in `evals/retrieval_compare_results.json`.
+| Metric | Hybrid | Hybrid + Rerank (top-4) | Change |
+|---|---|---|---|
+| hit@1 | 0.640 | 0.800 | +25.0% |
+| hit@3 | 0.860 | 0.920 | +7.0% |
+| hit@5 | 0.920 | 0.920 | 0.0% |
+| hit@8 | 0.920 | 0.920 | 0.0% |
+| MRR@8 | 0.753 | 0.857 | +13.8% |
+
+Hybrid search = vector search + PostgreSQL full-text search (tsvector + GIN) fused with Reciprocal Rank Fusion (RRF, k=60). Cohere `rerank-english-v3.0` cross-encoder re-ranks the fused pool down to top-4 for LLM context. Full results in `evals/retrieval_compare_results.json` and `evals/ragas_results.json`.
+
+> ⚠️ **Note:** The "Hybrid + Rerank (top-4)" metrics above reflect production behavior — 4 chunks after Cohere reranking (`top_n=4`), LLM context limited to 4 chunks (`--k 4`). Earlier published numbers (hit@1: 0.820, MRR@8: 0.877) were measured with 8-chunk context and `top_n=10` rerank, so they did not match production.
+
+Ragas answer-quality scores (faithfulness, answer relevancy, etc.) were measured at `top_k=8` and are stale — they need re-running at `top_k=4` to match production.
 
 ## 16. Known gaps / notes
 
 - `client/lib/api.ts` helpers call `/upload` and `/chat` without `/api/v1` in some paths; the active workspace (`SplitPage`) uses `/api/v1/...`. Align if using helpers.
 - Embedding column is `Unsupported` in Prisma; all vector access is raw SQL.
-- Automated tests are not yet implemented (recommended before production).
+- Automated tests: 24 Vitest tests pass across upload, document, and chat controllers (`server/tests/controllers/`). Run with `npm test` in `server/`.
 - Changing embedding model requires regenerating all embeddings and altering `vector(3072)`.
 - Worker runs inside the API process by default; for production, run `start:worker` separately and consider disabling in-process worker.
-- A neural cross-encoder re-ranker (after RRF) was considered but not implemented — could further improve top-of-list precision at the cost of latency.
+- Cohere cross-encoder re-ranker (`rerank-english-v3.0`) is implemented in `reranker.service.js` and integrated into `chat.controller.js` — fused pool (24 candidates) is re-ranked down to top-4 for the LLM context. Falls back to fused order if `COHERE_API_KEY` is unset or the call fails.
