@@ -537,6 +537,18 @@ All five metrics have **50/50 valid scores**. The mean of the five metric averag
 
 > The dataset contains **47 answerable and 3 unanswerable** questions (Q48–Q50). Ragas scores noncommittal answers at zero relevancy, so the all-50 averages above are conservative. On the 47 answerable questions, the means are: faithfulness 96.40%, answer relevancy 93.14%, context precision 72.01%, context recall 92.91%, and answer correctness 73.93%.
 
+### Answer quality: LLM-as-Judge (top_k=4, production match)
+
+Answer quality was also scored with **LLM-as-Judge** (Groq `openai/gpt-oss-120b`) on the same 50-question dataset at `top_k=4` — matching production's 4-chunk reranked context. Each answer was judged on three rubrics (correctness vs reference, faithfulness to context, relevancy to question) on a 0–1 scale. All 50/50 questions were scored.
+
+| Metric | Mean (0–1) | Mean (%) | Valid n | vs Ragas (top_k=8) |
+|---|---:|---:|---:|---|
+| **Correctness** | 0.867 | **86.7%** | 50 | +13.9 pts (was 72.77%) |
+| **Faithfulness** | 0.927 | **92.7%** | 50 | +1.1 pts (was 91.62%) |
+| **Relevancy** | 0.877 | **87.7%** | 50 | +0.2 pts (was 87.55%) |
+
+> **Note:** Ragas and LLM-as-Judge measure different things — Ragas uses reference+embedding-based scoring, LLM-as-Judge uses an LLM rubric judge. The LLM-as-Judge numbers below reflect production behavior (`top_k=4`, 4 chunks after Cohere reranking); the Ragas table above was measured at `top_k=8` and is stale. Where both metrics overlap, LLM-as-Judge scores are comparable or higher.
+
 ### How to run the evaluations
 
 ```bash

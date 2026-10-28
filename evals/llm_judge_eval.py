@@ -239,13 +239,25 @@ def main():
     agg = save()
 
     # ---- retrieval aggregate (computed directly, no LLM) ----
-    topks = sorted({int(k.split("@")[1]) for k in (retrieval_rows[0] if retrieval_rows else {}) if k.startswith("hit@")})
+    topks = set()
+    for r in retrieval_rows:
+        for key in r:
+            if key.startswith("hit@"):
+                try:
+                    topks.add(int(key.split("@")[1]))
+                except (ValueError, IndexError):
+                    pass
+    topks = sorted(topks) or [1, 3, 4, 5, 8, 10]
     print("\n========== RETRIEVAL ==========")
     for k in topks:
-        print(f"  hit@{k:<2d}: {mean([r[f'hit@{k}'] for r in retrieval_rows]):.3f}   "
-              f"recall@{k:<2d}: {mean([r[f'recall@{k}'] for r in retrieval_rows]):.3f}")
+        hit_key = f"hit@{k}"
+        recall_key = f"recall@{k}"
+        hit_vals = [r.get(hit_key, 0.0) for r in retrieval_rows]
+        recall_vals = [r.get(recall_key, 0.0) for r in retrieval_rows]
+        print(f"  hit@{k:<2d}: {mean(hit_vals):.3f}   "
+              f"recall@{k:<2d}: {mean(recall_vals):.3f}")
     if retrieval_rows:
-        print(f"  MRR: {mean([r['mrr'] for r in retrieval_rows]):.3f}")
+        print(f"  MRR: {mean([r.get('mrr', 0.0) for r in retrieval_rows]):.3f}")
 
     print("\n========== LLM-AS-JUDGE ==========")
     for key, _ in METRICS:
